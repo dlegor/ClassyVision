@@ -55,9 +55,19 @@ def profile(
                 return profiler
 
 
-def _layer_flops(layer, x):
+def _layer_flops(layer, x, _):
     """
     Computes the number of FLOPs required for a single layer.
+
+    For common layers, such as Conv1d, the flop compute is implemented in this
+    centralized place.
+    For other layers, if it defines a method to compute flops with the signature
+    below, we will use it to compute flops.
+
+    Class MyModule(nn.Module):
+        def flops(self, x):
+            ...
+
     """
 
     # get layer type:
@@ -128,7 +138,7 @@ def _layer_flops(layer, x):
         return count1 + count2
 
     # non-linearities:
-    elif layer_type in ["ReLU", "Tanh", "Sigmoid", "Softmax"]:
+    elif layer_type in ["ReLU", "ReLU6", "Tanh", "Sigmoid", "Softmax"]:
         return x.numel()
 
     # 2D pooling layers:
@@ -166,7 +176,7 @@ def _layer_flops(layer, x):
     # linear layer:
     elif layer_type in ["Linear"]:
         weight_ops = layer.weight.numel()
-        bias_ops = layer.bias.numel()
+        bias_ops = layer.bias.numel() if layer.bias is not None else 0
         return x.size()[0] * (weight_ops + bias_ops)
 
     # 2D/3D batch normalization:
@@ -230,6 +240,26 @@ def _layer_flops(layer, x):
         )
         return batchsize_per_replica * x.size()[1] * out_t * out_h * out_w * kernel_ops
 
+    # adaptive avg pool3d
+    # This is approximate and works only for downsampling without padding
+    # based on aten/src/ATen/native/AdaptiveAveragePooling3d.cpp
+    elif layer_type in ["AdaptiveAvgPool3d"]:
+        in_t = x.size()[2]
+        in_h = x.size()[3]
+        in_w = x.size()[4]
+        out_t = layer.output_size[0]
+        out_h = layer.output_size[1]
+        out_w = layer.output_size[2]
+        if out_t > in_t or out_h > in_h or out_w > in_w:
+            raise NotImplementedError()
+        batchsize_per_replica = x.size()[0]
+        num_channels = x.size()[1]
+        kt = in_t - out_t + 1
+        kh = in_h - out_h + 1
+        kw = in_w - out_w + 1
+        kernel_ops = kt * kh * kw
+        return batchsize_per_replica * num_channels * out_t * out_w * out_h * kernel_ops
+
     # dropout layer
     elif layer_type in ["Dropout"]:
         # At test time, we do not drop values but scale the feature map by the
@@ -238,9 +268,26 @@ def _layer_flops(layer, x):
         for dim_size in x.size():
             flops *= dim_size
         return flops
+    elif hasattr(layer, "flops"):
+        # If the module already defines a method to compute flops with the signature
+        # below, we use it to compute flops
+        #
+        #   Class MyModule(nn.Module):
+        #     def flops(self, x):
+        #       ...
+        return layer.flops(x)
 
     # not implemented:
     raise NotImplementedError("FLOPs not implemented for %s layer" % layer_type)
+
+
+def _layer_activations(layer, x, out):
+    """
+    Computes the number of activations produced by a single layer.
+
+    Activations are counted only for convolutional layers.
+    """
+    return out.numel() if isinstance(layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)) else 0
 
 
 def summarize_profiler_info(prof):
@@ -264,37 +311,40 @@ def summarize_profiler_info(prof):
     return str
 
 
-def _flops_module(module, flops_list):
+def _patched_computation_module(module, compute_list, compute_fn):
     """
-    Convert module into FLOP-counting module.
+    Patch the module to compute a module's parameters, like FLOPs.
+
+    Calls compute_fn and appends the results to compute_list.
     """
     ty = type(module)
     typestring = module.__repr__()
 
-    class FLOPsModule(ty):
+    class ComputeModule(ty):
         orig_type = ty
 
         def _original_forward(self, *args, **kwargs):
             return ty.forward(self, *args, **kwargs)
 
         def forward(self, *args, **kwargs):
-            flops_list.append(_layer_flops(self, args[0]))
-            return self._original_forward(*args, **kwargs)
+            out = self._original_forward(*args, **kwargs)
+            compute_list.append(compute_fn(self, args[0], out))
+            return out
 
         def __repr__(self):
             return typestring
 
-    return FLOPsModule
+    return ComputeModule
 
 
-def modify_forward(model, flops_list):
+def modify_forward(model, compute_list, compute_fn):
     """
-    Modify forward pass to measure FLOPs:
+    Modify forward pass to measure a module's parameters, like FLOPs.
     """
     if is_leaf(model):
-        model.__class__ = _flops_module(model, flops_list)
+        model.__class__ = _patched_computation_module(model, compute_list, compute_fn)
     for child in model.children():
-        modify_forward(child, flops_list)
+        modify_forward(child, compute_list, compute_fn)
 
     return model
 
@@ -311,9 +361,9 @@ def restore_forward(model):
     return model
 
 
-def compute_flops(model, input_shape=(3, 244, 244), input_key=None):
+def compute_complexity(model, compute_fn, input_shape, input_key=None):
     """
-    Compute the number of FLOPs needed for a forward pass.
+    Compute the complexity of a forward pass.
     """
 
     # assertions, input, and upvalue in which we will perform the count:
@@ -321,17 +371,31 @@ def compute_flops(model, input_shape=(3, 244, 244), input_key=None):
     if not isinstance(input_shape, abc.Sequence):
         return None
     input = get_model_dummy_input(model, input_shape, input_key)
-    flops_list = []
+    compute_list = []
 
     # measure FLOPs:
-    modify_forward(model, flops_list)
+    modify_forward(model, compute_list, compute_fn)
     try:
         model.forward(input)
     except NotImplementedError as err:
         raise err
     finally:
         restore_forward(model)
-    return sum(flops_list)
+    return sum(compute_list)
+
+
+def compute_flops(model, input_shape=(3, 224, 224), input_key=None):
+    """
+    Compute the number of FLOPs needed for a forward pass.
+    """
+    return compute_complexity(model, _layer_flops, input_shape, input_key)
+
+
+def compute_activations(model, input_shape=(3, 224, 224), input_key=None):
+    """
+    Compute the number of activations created in a forward pass.
+    """
+    return compute_complexity(model, _layer_activations, input_shape, input_key)
 
 
 def count_params(model):

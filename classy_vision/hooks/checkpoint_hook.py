@@ -5,15 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import os
-import tempfile
-from shutil import copy2, move
 from typing import Any, Collection, Dict, Optional
 
 from classy_vision import tasks
 from classy_vision.generic.distributed_util import is_master
 from classy_vision.generic.util import get_checkpoint_dict, save_checkpoint
 from classy_vision.hooks.classy_hook import ClassyHook
+from fvcore.common.file_io import PathManager
 
 
 class CheckpointHook(ClassyHook):
@@ -26,7 +24,7 @@ class CheckpointHook(ClassyHook):
     on_phase_start = ClassyHook._noop
     on_forward = ClassyHook._noop
     on_loss_and_meter = ClassyHook._noop
-    on_update = ClassyHook._noop
+    on_step = ClassyHook._noop
     on_end = ClassyHook._noop
 
     def __init__(
@@ -42,16 +40,16 @@ class CheckpointHook(ClassyHook):
             checkpoint_folder: Folder to store checkpoints in
             input_args: Any arguments to save about the runtime setup. For example,
                 it is useful to store the config that was used to instantiate the model.
-            phase_types: If ``phase_types`` is specified, only checkpoint on those phase
-                types. Each item in ``phase_types`` must be either "train" or "test".
+            phase_types: If `phase_types` is specified, only checkpoint on those phase
+                types. Each item in `phase_types` must be either "train" or "test". If
+                not specified, it is set to checkpoint after "train" phases.
             checkpoint_period: Checkpoint at the end of every x phases (default 1)
-
         """
         super().__init__()
         self.checkpoint_folder: str = checkpoint_folder
         self.input_args: Any = input_args
         if phase_types is None:
-            phase_types = ["train", "test"]
+            phase_types = ["train"]
         assert len(phase_types) > 0 and all(
             phase_type in ["train", "test"] for phase_type in phase_types
         ), "phase_types should contain one or more of ['train', 'test']"
@@ -66,7 +64,7 @@ class CheckpointHook(ClassyHook):
     def _save_checkpoint(self, task, filename):
         if getattr(task, "test_only", False):
             return
-        assert os.path.exists(
+        assert PathManager.exists(
             self.checkpoint_folder
         ), "Checkpoint folder '{}' deleted unexpectedly".format(self.checkpoint_folder)
 
@@ -78,17 +76,14 @@ class CheckpointHook(ClassyHook):
 
         # make copy of checkpoint that won't be overwritten:
         if checkpoint_file:
-            tmp_dir = tempfile.mkdtemp()
-            tmp_file = os.path.join(tmp_dir, filename)
-            copy2(checkpoint_file, tmp_file)
-            move(tmp_file, os.path.join(self.checkpoint_folder, filename))
+            PathManager.copy(checkpoint_file, f"{self.checkpoint_folder}/{filename}")
 
     def on_start(
         self, task: "tasks.ClassyTask", local_variables: Dict[str, Any]
     ) -> None:
-        if getattr(task, "test_only", False):
+        if not is_master() or getattr(task, "test_only", False):
             return
-        if not os.path.exists(self.checkpoint_folder):
+        if not PathManager.exists(self.checkpoint_folder):
             err_msg = "Checkpoint folder '{}' does not exist.".format(
                 self.checkpoint_folder
             )

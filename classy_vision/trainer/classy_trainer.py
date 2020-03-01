@@ -4,12 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 from typing import Optional
 
 import torch
-from classy_vision.generic.distributed_util import barrier, is_distributed_training_run
-from classy_vision.hooks import ClassyHookFunctions
+from classy_vision.generic.distributed_util import barrier
 from classy_vision.tasks import ClassyTask
 
 
@@ -68,29 +66,19 @@ class ClassyTrainer:
         )
         assert isinstance(task, ClassyTask)
 
-        if is_distributed_training_run():
-            task.init_distributed_data_parallel_model()
+        # make sure all the workers start training at the same time
+        # this helps catch hangs which would have happened elsewhere
+        barrier()
 
         local_variables = {}
-        task.run_hooks(local_variables, ClassyHookFunctions.on_start.name)
 
+        task.on_start(local_variables)
         while not task.done_training():
-            task.advance_phase()
-
-            # Start phase hooks
-            task.run_hooks(local_variables, ClassyHookFunctions.on_phase_start.name)
+            task.on_phase_start(local_variables)
             while True:
-                # Process next sample
                 try:
-                    task.train_step(self.use_gpu, local_variables)
+                    task.step(self.use_gpu, local_variables)
                 except StopIteration:
                     break
-
-            logging.info("Syncing meters on phase end...")
-            for meter in task.meters:
-                meter.sync_state()
-            logging.info("...meters synced")
-            barrier()
-            task.run_hooks(local_variables, ClassyHookFunctions.on_phase_end.name)
-
-        task.run_hooks(local_variables, ClassyHookFunctions.on_end.name)
+            task.on_phase_end(local_variables)
+        task.on_end(local_variables)

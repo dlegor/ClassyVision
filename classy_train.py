@@ -75,14 +75,13 @@ def main(args, config):
 
     task = build_task(config)
 
-    # Load checkpoint, if available. This automatically resumes from an
-    # existing checkpoint, in case training is being restarted.
-    checkpoint = load_checkpoint(args.checkpoint_folder)
+    # Load checkpoint, if available.
+    checkpoint = load_checkpoint(args.checkpoint_load_path)
     task.set_checkpoint(checkpoint)
 
     # Load a checkpoint contraining a pre-trained model. This is how we
     # implement fine-tuning of existing models.
-    pretrained_checkpoint = load_checkpoint(args.pretrained_checkpoint_folder)
+    pretrained_checkpoint = load_checkpoint(args.pretrained_checkpoint_path)
     if pretrained_checkpoint is not None:
         assert isinstance(
             task, FineTuningTask
@@ -130,7 +129,7 @@ def configure_hooks(args, config):
         try:
             from tensorboardX import SummaryWriter
 
-            tb_writer = SummaryWriter(log_dir=base_folder / "tensorboard")
+            tb_writer = SummaryWriter(log_dir=Path(base_folder) / "tensorboard")
             hooks.append(TensorboardPlotHook(tb_writer))
         except ImportError:
             logging.warning("tensorboardX not installed, skipping tensorboard hooks")

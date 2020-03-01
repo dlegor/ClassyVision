@@ -21,7 +21,7 @@ class TimeMetricsHook(ClassyHook):
 
     on_start = ClassyHook._noop
     on_forward = ClassyHook._noop
-    on_update = ClassyHook._noop
+    on_step = ClassyHook._noop
     on_end = ClassyHook._noop
 
     def __init__(self, log_freq: Optional[int] = None) -> None:
@@ -42,7 +42,7 @@ class TimeMetricsHook(ClassyHook):
         self.start_time = time.time()
         local_variables["perf_stats"] = PerfStats()
 
-    def on_loss_and_meter(
+    def on_step(
         self, task: "tasks.ClassyTask", local_variables: Dict[str, Any]
     ) -> None:
         """

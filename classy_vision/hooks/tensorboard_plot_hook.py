@@ -64,7 +64,7 @@ class TensorboardPlotHook(ClassyHook):
         self.wall_times = []
         self.num_steps_global = []
 
-    def on_update(
+    def on_step(
         self, task: "tasks.ClassyTask", local_variables: Dict[str, Any]
     ) -> None:
         """Store the observed learning rates."""
@@ -139,6 +139,20 @@ class TensorboardPlotHook(ClassyHook):
                         f"Skipping meter name {meter.name}_{name} with value: {value}"
                     )
                     continue
+
+        if hasattr(task, "perf_log"):
+            for perf in task.perf_log:
+                phase_idx = perf["phase_idx"]
+                tag = perf["tag"]
+                for metric_name, metric_value in perf.items():
+                    if metric_name in ["phase_idx", "tag"]:
+                        continue
+
+                    self.tb_writer.add_scalar(
+                        f"Speed/{tag}/{metric_name}",
+                        metric_value,
+                        global_step=phase_idx,
+                    )
 
         # flush so that the plots aren't lost if training crashes soon after
         self.tb_writer.flush()

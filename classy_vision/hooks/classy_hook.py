@@ -5,24 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
-from enum import Enum, auto
 from typing import Any, Dict
 
 from classy_vision import tasks
-
-
-class ClassyHookFunctions(Enum):
-    """
-    Enumeration of all the hook functions in the ClassyHook class.
-    """
-
-    on_start = auto()
-    on_phase_start = auto()
-    on_forward = auto()
-    on_loss_and_meter = auto()
-    on_update = auto()
-    on_phase_end = auto()
-    on_end = auto()
 
 
 class ClassyHookState:
@@ -44,8 +29,8 @@ class ClassyHook(ABC):
     Hooks allow to inject behavior at different places of the training loop, which
     are listed below in the chronological order.
 
-        on_start -> on_phase_start -> on_forward -> on_loss_and_meter ->
-            on_update -> on_phase_end -> on_end
+        on_start -> on_phase_start ->
+            on_step -> on_phase_end -> on_end
 
     Deriving classes should call ``super().__init__()`` and store any state in
     ``self.state``. Any state added to this property should be serializable.
@@ -94,21 +79,7 @@ class ClassyHook(ABC):
         pass
 
     @abstractmethod
-    def on_forward(
-        self, task: "tasks.ClassyTask", local_variables: Dict[str, Any]
-    ) -> None:
-        """Called each time forward pass is done in the model."""
-        pass
-
-    @abstractmethod
-    def on_loss_and_meter(
-        self, task: "tasks.ClassyTask", local_variables: Dict[str, Any]
-    ) -> None:
-        """Called each time after a loss has been computed and meters are updated."""
-        pass
-
-    @abstractmethod
-    def on_update(
+    def on_step(
         self, task: "tasks.ClassyTask", local_variables: Dict[str, Any]
     ) -> None:
         """Called each time after parameters have been updated by the optimizer."""

@@ -13,11 +13,7 @@ import numpy
 import torch
 import torchelastic
 import torchelastic.distributed as dist
-from classy_vision.generic.distributed_util import (
-    barrier,
-    set_cpu_device,
-    set_cuda_device_index,
-)
+from classy_vision.generic.distributed_util import set_cpu_device, set_cuda_device_index
 from classy_vision.generic.util import get_checkpoint_dict
 from classy_vision.hooks import ClassyHookFunctions
 from classy_vision.tasks import ClassyTask
@@ -82,7 +78,7 @@ class ElasticTrainer(ClassyTrainer):
             if state.run_start_hooks:
                 # need this to ensure we don't run the on_start hooks every time
                 # a trainer starts
-                state.task.run_hooks(local_variables, ClassyHookFunctions.on_start.name)
+                state.task.on_start(local_variables)
                 state.run_start_hooks = False
                 return state, self._ClassyWorkerStats(None)
 
@@ -90,7 +86,7 @@ class ElasticTrainer(ClassyTrainer):
 
         torchelastic.train(self.elastic_coordinator, elastic_train_step, state)
 
-        task.run_hooks(local_variables, ClassyHookFunctions.on_end.name)
+        task.on_end(local_variables)
 
     def _run_step(self, state, local_variables, use_gpu):
         # Check for training complete but only terminate when the last phase is done
@@ -98,12 +94,9 @@ class ElasticTrainer(ClassyTrainer):
             raise StopIteration
 
         if state.advance_to_next_phase:
-            state.task.advance_phase()
-
-            # Start phase hooks
-            state.task.run_hooks(
-                local_variables, ClassyHookFunctions.on_phase_start.name
-            )
+            self.elastic_coordinator.barrier()
+            self.elastic_coordinator._log_event("on_phase_start")
+            state.task.on_phase_start(local_variables)
 
             state.advance_to_next_phase = False
 
@@ -113,19 +106,13 @@ class ElasticTrainer(ClassyTrainer):
                 state.advance_to_next_phase = True
                 state.skip_current_phase = False  # Reset flag
             else:
-                state.task.train_step(use_gpu, local_variables)
+                state.task.step(use_gpu, local_variables)
         except StopIteration:
             state.advance_to_next_phase = True
+
         if state.advance_to_next_phase:
-            logging.info("Syncing meters on phase end...")
-            for meter in state.task.meters:
-                meter.sync_state()
-            logging.info("...meters synced")
-            barrier()
-            # Phase complete
-            # NOTE: this is a good time to checkpoint, as it guarantees
-            # that loading from checkpoint will properly advance the phase.
-            state.task.run_hooks(local_variables, ClassyHookFunctions.on_phase_end.name)
+            self.elastic_coordinator.barrier()
+            state.task.on_phase_end(local_variables)
 
         progress_rate = None  # using None to signal 'unknown'
         perf_stats = local_variables.get("perf_stats", None)
@@ -218,7 +205,6 @@ class ElasticTrainer(ClassyTrainer):
             # currently.
             for phase_type in self.task.datasets.keys():
                 self.task._recreate_data_loader_from_dataset(phase_type)
-            self.task._reshuffle_data()
             self.task.create_data_iterator()
             # Set up pytorch module in train vs eval mode, update optimizer.
             self.task._set_model_train_mode()
